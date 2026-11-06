@@ -47,6 +47,7 @@ from ombrebrain.domain.plan_history import append_plan_change_log as append_plan
 
 from . import _runtime as rt
 from ._relation_link import link_new_bucket
+from ._predehydrate import predehydrate_for_surface
 
 _EMBED_WARN = (
     "向量暂未完成，该桶当前仅支持关键词匹配；正文已保存。"
@@ -1132,6 +1133,10 @@ async def _merge_or_create_inner(
                         f"source_tool={source_tool or '_'} "
                         f"score={existing[0].get('score', 0):.3f}"
                     )
+                    # 合并后的桶全文已变，旧缓存刚被 invalidate——后台立即重脱，
+                    # 别等它下次被浮现选中时才在现场做（见 _predehydrate 模块 docstring）。
+                    if not test_data:
+                        asyncio.create_task(predehydrate_for_surface(candidate_id))
                     return candidate_id, True, ""
                 else:
                     rt.logger.warning(
@@ -1282,8 +1287,11 @@ async def _merge_or_create_inner(
     # 自动建立桶间关系：fire-and-forget，写入返回不等它。
     # 只在**新建**时触发——合并进已有桶时那条桶的关系已经建过了，
     # 重复推断只会反复撞每桶上限。关系建不出来不影响记忆本身。
+    # 预脱水同理只在新建时触发（合并分支自己补）；两者都是往缓存/派生层
+    # 焐热数据，炸了只记日志，不影响写入。
     if not test_data:
         asyncio.create_task(link_new_bucket(bucket_id, content))
+        asyncio.create_task(predehydrate_for_surface(bucket_id))
 
     return bucket_id, False, embed_warn
 
