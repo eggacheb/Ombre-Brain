@@ -1467,3 +1467,81 @@ def register(mcp) -> None:
             return err
         n = clear_errors_log()
         return JSONResponse({"ok": True, "cleared": n})
+
+    # ------------------------------------------------------------
+    # 脱水缓存焐热：对全部会浮现的桶后台预脱水，焐热内容哈希缓存。
+    # 换模型 / 冷启动 / 缓存失效后，点一次即可让 /breath-hook 全走缓存，
+    # 而不是把脱水成本摊到每一次对话开场的现场调用上。
+    # ------------------------------------------------------------
+    _cache_warm_state: dict[str, Any] = {
+        "running": False, "planning": True, "planned": 0,
+        "done": 0, "total": 0, "warmed": 0, "skipped": 0,
+        "surface": 0, "needs_llm": 0,
+        "started_ts": 0.0, "finished_ts": 0.0,
+    }
+    _cache_warm_task: dict[str, Any] = {"task": None}
+
+    async def _cache_warm_worker() -> None:
+        from tools._predehydrate import predehydrate_for_surface, predehydrate_plan
+        st = _cache_warm_state
+        try:
+            all_buckets = await sh.bucket_mgr.list_all(include_archive=False)
+            ids = [b["id"] for b in all_buckets]
+            st["total"] = len(ids)
+            st["done"] = st["warmed"] = st["skipped"] = 0
+            st["surface"] = st["needs_llm"] = 0
+            st["planning"] = True
+            st["planned"] = 0
+            st["started_ts"] = time.time()
+            # 第一阶段：只查不调——统计这次焐热会真正请求脱水 LLM 的桶数，
+            # 让用户在烧钱之前就看到量。分类逻辑与焐热共用 predehydrate_plan。
+            for bucket_id in ids:
+                plan = await predehydrate_plan(bucket_id)
+                st["planned"] += 1
+                if plan == "llm":
+                    st["needs_llm"] += 1
+                elif plan is not None:
+                    st["surface"] += 1
+            st["planning"] = False
+            # 第二阶段：按计划焐热。
+            for bucket_id in ids:
+                try:
+                    warmed = await predehydrate_for_surface(bucket_id)
+                except Exception:
+                    warmed = False
+                if warmed:
+                    st["warmed"] += 1
+                else:
+                    st["skipped"] += 1
+                st["done"] += 1
+        except Exception as e:
+            sh.logger.warning(f"cache warm worker failed: {type(e).__name__}: {e}")
+        finally:
+            st["running"] = False
+            st["finished_ts"] = time.time()
+
+    @mcp.custom_route("/api/system/cache/warm", methods=["POST"])
+    async def api_cache_warm_start(request: Request) -> Response:
+        from starlette.responses import JSONResponse
+        err = sh._require_auth(request)
+        if err:
+            return err
+        st = _cache_warm_state
+        if st["running"]:
+            return JSONResponse({"ok": True, "already_running": True, **st})
+        st["running"] = True
+        st["planning"] = True
+        st["planned"] = 0
+        st["done"] = st["total"] = st["warmed"] = st["skipped"] = 0
+        st["surface"] = st["needs_llm"] = 0
+        st["started_ts"] = st["finished_ts"] = 0.0
+        _cache_warm_task["task"] = asyncio.create_task(_cache_warm_worker())
+        return JSONResponse({"ok": True, "already_running": False, **st})
+
+    @mcp.custom_route("/api/system/cache/warm", methods=["GET"])
+    async def api_cache_warm_status(request: Request) -> Response:
+        from starlette.responses import JSONResponse
+        err = sh._require_auth(request)
+        if err:
+            return err
+        return JSONResponse({"ok": True, **_cache_warm_state})

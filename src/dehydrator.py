@@ -447,16 +447,15 @@ class Dehydrator:
         return conn
 
     def _content_key(self, content: str) -> str:
-        """缓存键 = hash(prompt 版本 + 人名 + 模型配置 + 原文)。
+        """缓存键 = hash(prompt 版本 + 人名 + 原文)。
 
         缓存原本只按 content_hash 存，导致脱水 prompt 改了、人名改了，旧的
-        third-person 摘要仍会命中缓存返回——视角修复对存量内容不生效。把
-        prompt 版本、人名、api_format、base_url 和 model 混进 key，换模型或端点后
-        下次 breath 会用新配置重新脱水，不会复用旧模型的摘要。"""
-        keyed = (
-            f"{_PROMPT_VERSION}|{self.human}|{self.api_format}|"
-            f"{self.base_url.rstrip('/')}|{self.model}|{content}"
-        )
+        third-person 摘要仍会命中缓存返回——视角修复对存量内容不生效。所以把
+        prompt 版本和人名混进 key。api_format / base_url / model 曾也在键里，
+        但摘要只取决于 prompt 与内容，与哪家供应商无关；混进去后换一次模型
+        整个缓存作废、重新烧一遍脱水钱，故移除。换供应商后继续复用旧摘要。
+        （注意：键格式本身变了，这次改动会让存量缓存整体失效一次。）"""
+        keyed = f"{_PROMPT_VERSION}|{self.human}|{content}"
         return hashlib.sha256(keyed.encode()).hexdigest()
 
     def _get_cached_summary(self, content: str) -> str | None:
@@ -466,6 +465,10 @@ class Dehydrator:
             (self._content_key(content),)
         ).fetchone()
         return row[0] if row else None
+
+    def has_cached_summary(self, content: str) -> bool:
+        """该内容是否已有脱水缓存。给焐热进度统计用：只查缓存，绝不调用 LLM。"""
+        return self._get_cached_summary(content) is not None
 
     def _set_cached_summary(self, content: str, summary: str):
         """Store dehydration result in cache."""

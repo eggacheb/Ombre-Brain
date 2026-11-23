@@ -235,7 +235,9 @@ def register(mcp) -> None:
             return max(minimum, min(maximum, value))
 
         timeout_seconds = setting_int("timeout_seconds", 45, 5, 120)
-        per_call_timeout = setting_int("dehydrate_timeout_seconds", 12, 2, 30)
+        # 上限 60：慢供应商（如思考型模型，单次 18~50s）也能被兜住，超时失败
+        # 不写缓存会导致每次 hook 请求重复烧模型。
+        per_call_timeout = setting_int("dehydrate_timeout_seconds", 12, 2, 60)
         max_dehydrate_calls = setting_int("max_dehydrate_calls", 8, 0, 32)
         token_budget = setting_int("max_tokens", 10_000, 500, 50_000)
         no_store_headers = {

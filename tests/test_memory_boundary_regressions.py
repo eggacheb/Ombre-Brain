@@ -310,7 +310,7 @@ async def test_hold_similar_but_cross_date_event_does_not_merge(tmp_path, monkey
 
 
 @pytest.mark.asyncio
-async def test_long_breath_dehydrates_once_then_uses_model_scoped_cache(
+async def test_long_breath_dehydrates_once_then_reuses_cache_across_models(
     tmp_path, monkeypatch
 ):
     content = "这是一个足够长的记忆桶，首次 breath 需要调用所选脱水模型。" * 160
@@ -363,9 +363,11 @@ async def test_long_breath_dehydrates_once_then_uses_model_scoped_cache(
     monkeypatch.setattr(sonnet, "_api_dehydrate", call_sonnet)
     changed_model = await sonnet.dehydrate(content)
 
-    assert "Sonnet 新摘要" in changed_model
-    assert calls[-1] == ("sonnet", content)
-    assert haiku._content_key(content) != sonnet._content_key(content)
+    # 摘要只取决于 prompt 与内容，与模型/端点无关：换模型后继续复用缓存，
+    # 不重新烧 API（此前 model/base_url 混进缓存键，换一次模型整个缓存作废）。
+    assert changed_model == first
+    assert calls == [("haiku", content)]
+    assert haiku._content_key(content) == sonnet._content_key(content)
 
     haiku._cache_conn.close()
     sonnet._cache_conn.close()

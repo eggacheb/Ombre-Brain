@@ -18,6 +18,9 @@ dehydrate_timeout_seconds（默认 12s）。dehydrator 自带按内容哈希的 
 
 from ombrebrain.storage.letter_lock import is_letter_bucket
 
+from dehydrator import _DEHYDRATE_MIN_TOKENS
+from utils import count_tokens_approx
+
 from . import _runtime as rt
 
 # web/hooks.py breath_hook 的两个主池共同的排除项：unresolved 池排除这些类型，
@@ -31,6 +34,36 @@ _NON_SURFACE_TYPES = {"permanent", "feel", "plan", "letter", "self", "i"}
 def _truthy(value) -> bool:
     """与 web/hooks.py 的 _truthy 同语义：frontmatter 读回的布尔可能是字符串。"""
     return str(value or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+async def predehydrate_plan(bucket_id: str) -> str | None:
+    """焐热一个桶会怎么走，只查不调：绝不请求 LLM。
+
+    返回值：
+    - None    — 不进浮现池（protected / letter / 不浮现类型 / 空内容），焐热会跳过
+    - "cached" — 会进浮现池但无需请求 LLM（内容短于阈值直接透传，或已有缓存）
+    - "llm"   — 会进浮现池且要真正请求一次脱水 LLM（＝这次焐热的 API 花费）
+    """
+    try:
+        bucket = await rt.bucket_mgr.get(bucket_id)
+        if not bucket:
+            return None
+        metadata = bucket.get("metadata") or {}
+        if _truthy(metadata.get("protected")) or is_letter_bucket(bucket):
+            return None
+        bucket_type = str(metadata.get("type") or "")
+        if not _truthy(metadata.get("pinned")) and bucket_type in _NON_SURFACE_TYPES:
+            return None
+        content = str(bucket.get("content") or "")
+        if not content.strip():
+            return None
+        if count_tokens_approx(content) < _DEHYDRATE_MIN_TOKENS:
+            return "cached"
+        if rt.dehydrator.has_cached_summary(content):
+            return "cached"
+        return "llm"
+    except Exception:  # noqa: BLE001 - 统计失败不影响焐热本身
+        return None
 
 
 async def predehydrate_for_surface(bucket_id: str) -> bool:

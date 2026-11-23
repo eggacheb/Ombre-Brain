@@ -2897,6 +2897,11 @@
         <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">留空不改。Key 保存后立即生效并写入 .env（重启持久）。</div>
         <div class="config-row"><label>Max Tokens</label><input type="number" id="cfg-dehy-maxtokens" min="128" max="8192" /></div>
         <div class="config-row"><label>Temperature</label><input type="number" id="cfg-dehy-temp" min="0" max="2" step="0.05" /></div>
+        <div class="config-row" style="align-items:center;">
+          <label>浮现缓存</label>
+          <button type="button" id="cache-warm-btn" onclick="warmDehydrationCache()" title="预热脱水缓存 / Warm dehydration cache" style="margin-left:8px;padding:0 10px;height:32px;font-size:12px;white-space:nowrap;display:inline-flex;align-items:center;gap:4px;"><i data-lucide="flame"></i> 一键焐热</button>
+          <span id="cache-warm-msg" style="margin-left:8px;font-size:11px;color:var(--text-dim);">换模型或缓存失效后点一次，/breath-hook 即可全走缓存</span>
+        </div>
       </div>
 
       <div>
@@ -4142,6 +4147,38 @@ async function testDehydrationKey() {
     msgEl.style.color = 'var(--negative)'; msgEl.innerHTML = _SV.err + ' ' + esc(d.error || '连接失败');
     chickReactForApiProblem(d.error);
   }
+}
+
+var _cacheWarmPollTimer = null;
+async function warmDehydrationCache() {
+  const msgEl = document.getElementById('cache-warm-msg');
+  const btn = document.getElementById('cache-warm-btn');
+  if (!msgEl || !btn) return;
+  btn.disabled = true;
+  msgEl.style.color = 'var(--text-dim)';
+  msgEl.textContent = '启动中… / Starting…';
+  const resp = await authFetch('/api/system/cache/warm', { method: 'POST' });
+  if (!resp) { btn.disabled = false; msgEl.textContent = '请求失败'; return; }
+  if (_cacheWarmPollTimer) clearInterval(_cacheWarmPollTimer);
+  _cacheWarmPollTimer = setInterval(async function () {
+    const sresp = await authFetch('/api/system/cache/warm');
+    if (!sresp) return;
+    const s = await sresp.json().catch(() => ({}));
+    if (s.running && s.planning) {
+      msgEl.textContent = '统计中… ' + s.planned + '/' + s.total + '（只查缓存，不调模型）';
+    } else if (s.running) {
+      msgEl.textContent = '焐热中… ' + s.done + '/' + s.total
+        + ' · 本次请求脱水 LLM：' + s.needs_llm + ' 桶';
+    }
+    if (!s.running && s.finished_ts > 0) {
+      clearInterval(_cacheWarmPollTimer);
+      _cacheWarmPollTimer = null;
+      btn.disabled = false;
+      msgEl.style.color = 'var(--positive, #9DC880)';
+      msgEl.textContent = '完成：浮现桶 ' + s.surface + ' 条，其中请求脱水 LLM '
+        + s.needs_llm + ' 次，其余走缓存或原文透传（另跳过 ' + s.skipped + ' 条不浮现的桶）';
+    }
+  }, 2000);
 }
 
 async function testEmbeddingKey() {
